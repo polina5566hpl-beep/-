@@ -358,7 +358,8 @@ a.ico-btn{text-decoration:none}
   <div id="login" class="login" hidden>
     <form id="login-f" class="panel" novalidate>
       <h2>تسجيل الدخول</h2>
-      <p class="muted">أدخل كلمة مرور لوحة الطلبات لعرض الطلبات.</p>
+      <p class="muted">سجّل الدخول لعرض طلبات المتجر.</p>
+      <div class="field"><label for="em">البريد الإلكتروني</label><input id="em" type="email" class="ltr" autocomplete="username"></div>
       <div class="field"><label for="pw">كلمة المرور</label><input id="pw" type="password" class="ltr" autocomplete="current-password"></div>
       <p id="login-err" class="err" role="alert"></p>
       <button type="submit" class="btn btn-accent">دخول</button>
@@ -371,7 +372,9 @@ a.ico-btn{text-decoration:none}
 (function(){
 'use strict';
 
-var API='https://script.google.com/macros/s/AKfycbzXDnD3FdDHUNbcSKbTOcF_y-WIl38ADCi0bGGthA0HSsQnSL0tNqn0JTFNAJvUMh8v/exec';
+// ضع هنا بيانات مشروعك من Supabase (Project Settings > API)
+var SB_URL='https://YOUR-PROJECT.supabase.co';
+var SB_KEY='YOUR-ANON-PUBLIC-KEY';
 
 var WIL=["أدرار","الشلف","الأغواط","أم البواقي","باتنة","بجاية","بسكرة","بشار","البليدة","البويرة","تمنراست","تبسة","تلمسان","تيارت","تيزي وزو","الجزائر","الجلفة","جيجل","سطيف","سعيدة","سكيكدة","سيدي بلعباس","عنابة","قالمة","قسنطينة","المدية","مستغانم","المسيلة","معسكر","ورقلة","وهران","البيض","إليزي","برج بوعريريج","بومرداس","الطارف","تندوف","تيسمسيلت","الوادي","خنشلة","سوق أهراس","تيبازة","ميلة","عين الدفلى","النعامة","عين تموشنت","غرداية","غليزان","تيميمون","برج باجي مختار","أولاد جلال","بني عباس","عين صالح","عين قزام","توقرت","جانت","المغير","المنيعة"];
 var ST={new:'جديد',confirmed:'مؤكد',noanswer:'لا يرد',cancelled:'ملغى'};
@@ -684,23 +687,57 @@ setInterval(function(){
   document.querySelectorAll('.ago[data-ts]').forEach(function(el){el.textContent=ago(Number(el.dataset.ts));});
 },60000);
 
-async function api(action,extra){
-  var body=Object.assign({action:action,key:S.key},extra||{});
-  var r=await fetch(API,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(body)});
-  var j=await r.json();
-  if(!j.ok){var e=new Error(j.error||'error');e.code=j.error;throw e;}
+var SESSION=null;
+
+function saveSession(j){
+  SESSION={access:j.access_token,refresh:j.refresh_token,exp:Date.now()+((j.expires_in||3600)*1000)-60000};
+  S.key=SESSION.access;
+  try{localStorage.setItem('sbSession',JSON.stringify(SESSION));}catch(e){}
+}
+function codeErr(msg,code){var e=new Error(msg);e.code=code;return e;}
+
+async function auth(grant,body){
+  var r=await fetch(SB_URL+'/auth/v1/token?grant_type='+grant,{method:'POST',headers:{'apikey':SB_KEY,'Content-Type':'application/json'},body:JSON.stringify(body)});
+  var j={}; try{j=await r.json();}catch(e){}
+  if(!r.ok)throw codeErr(j.error_description||j.msg||'auth',(r.status===400||r.status===401)?'unauthorized':'network');
+  saveSession(j);
   return j;
 }
 
+async function rest(method,path,body,retried){
+  if(!SESSION)throw codeErr('no session','unauthorized');
+  if(Date.now()>SESSION.exp)await auth('refresh_token',{refresh_token:SESSION.refresh});
+  var h={'apikey':SB_KEY,'Authorization':'Bearer '+SESSION.access};
+  if(body!==undefined)h['Content-Type']='application/json';
+  if(method!=='GET')h['Prefer']='return=minimal';
+  var r=await fetch(SB_URL+'/rest/v1/'+path,{method:method,headers:h,body:body===undefined?undefined:JSON.stringify(body)});
+  if(r.status===401&&!retried){await auth('refresh_token',{refresh_token:SESSION.refresh});return rest(method,path,body,true);}
+  if(r.status===401)throw codeErr('unauthorized','unauthorized');
+  if(!r.ok)throw codeErr('http '+r.status,'http');
+  return method==='GET'?r.json():null;
+}
+
+async function api(action,x){
+  x=x||{};
+  if(action==='list')return {ok:true,orders:await rest('GET','orders?select=*&order=created_at.desc&limit=1000')};
+  if(action==='status'){await rest('PATCH','orders?id=eq.'+encodeURIComponent(x.id),{status:x.status});return {ok:true};}
+  if(action==='delete'){await rest('DELETE','orders?id=eq.'+encodeURIComponent(x.id));return {ok:true};}
+  if(action==='add'){
+    var o=x.order, sub=o.cart.reduce(function(t,i){return t+(Number(i.price)||0);},0);
+    await rest('POST','orders',{name:o.name,phone:o.phone,wilaya:o.wilaya,commune:o.commune||'',address:o.address||'',
+      items:o.cart,subtotal:sub,delivery:o.delivery,note:o.note||'',source:'يدوي'});
+    return {ok:true};
+  }
+  throw codeErr('bad action','http');
+}
+
 function norm(o){
-  var ph=String(o.phone||'').replace(/\D/g,''); if(ph.length===9)ph='0'+ph;
   var items=Array.isArray(o.items)?o.items:[];
-  var sub=Number(o.subtotal)||items.reduce(function(t,i){return t+(Number(i.price)||0);},0);
-  var del=Number(o.delivery)||0;
-  return {id:String(o.orderId),num:Number(o.num)||0,name:o.name||'',phone:ph,wilaya:o.wilaya||'',commune:o.commune||'',
-    address:o.address||'',items:items,subtotal:sub,delivery:del,total:Number(o.total)||sub+del,
-    status:ST[o.status]?o.status:'new',note:o.note||'',source:o.source||'المتجر',
-    createdAt:Number(o.createdAt)||0,updatedAt:Number(o.updatedAt)||Number(o.createdAt)||0};
+  var sub=Number(o.subtotal)||0, del=Number(o.delivery)||0;
+  return {id:String(o.id),num:Number(o.num)||0,name:o.name||'',phone:String(o.phone||'').replace(/\D/g,''),
+    wilaya:o.wilaya||'',commune:o.commune||'',address:o.address||'',items:items,subtotal:sub,delivery:del,
+    total:Number(o.total)||sub+del,status:ST[o.status]?o.status:'new',note:o.note||'',source:o.source||'المتجر',
+    createdAt:Date.parse(o.created_at)||0,updatedAt:Date.parse(o.updated_at)||Date.parse(o.created_at)||0};
 }
 
 async function load(){
@@ -715,7 +752,7 @@ async function load(){
     S.seen=new Set(list.map(function(o){return o.id;}));
     S.orders=list;S.loaded=true;S.live=true;S.err=null;
   }catch(e){
-    if(e&&e.code==='unauthorized'){logout('كلمة المرور غير صحيحة.');return;}
+    if(e&&e.code==='unauthorized'){logout('انتهت الجلسة. سجّل الدخول من جديد.');return;}
     S.loaded=true;S.live=false;S.err=(e&&e.code)||'network';
   }
   render();
@@ -723,29 +760,30 @@ async function load(){
 
 function showLogin(msg){
   $('login').hidden=false;$('login-err').textContent=msg||'';$('pw').value='';
-  setTimeout(function(){$('pw').focus();},50);
+  try{$('em').value=localStorage.getItem('sbEmail')||'';}catch(e){}
+  setTimeout(function(){($('em').value?$('pw'):$('em')).focus();},50);
 }
 
 function logout(msg){
-  S.key='';S.orders=[];S.seen=null;S.loaded=true;S.live=false;S.err=null;
-  try{localStorage.removeItem('dashKey');}catch(e){}
+  S.key='';SESSION=null;S.orders=[];S.seen=null;S.loaded=true;S.live=false;S.err=null;
+  try{localStorage.removeItem('sbSession');}catch(e){}
   menu(false,false);showLogin(msg);render();
 }
 
 $('login-f').addEventListener('submit',async function(ev){
   ev.preventDefault();
-  var pw=$('pw').value; if(!pw)return;
+  var em=$('em').value.trim(), pw=$('pw').value;
+  var err=$('login-err'); err.textContent='';
+  if(SB_URL.indexOf('YOUR-PROJECT')>=0){err.textContent='ضع رابط Supabase والمفتاح في أول السكربت داخل index.html.';return;}
+  if(!em||!pw){err.textContent='أدخل البريد وكلمة المرور.';return;}
   var btn=ev.submitter; if(btn)btn.disabled=true;
-  $('login-err').textContent='';
-  S.key=pw;
   try{
-    await api('ping');
-    try{localStorage.setItem('dashKey',pw);}catch(e){}
+    await auth('password',{email:em,password:pw});
+    try{localStorage.setItem('sbEmail',em);}catch(e){}
     $('login').hidden=true;S.loaded=false;render();
     await load();
   }catch(e){
-    S.key='';
-    $('login-err').textContent=(e&&e.code==='unauthorized')?'كلمة المرور غير صحيحة.':'تعذّر الاتصال بالخادم. تحقق من الإنترنت وحاول مرة أخرى.';
+    err.textContent=(e&&e.code==='unauthorized')?'البريد أو كلمة المرور غير صحيحة.':'تعذّر الاتصال بالخادم. تحقق من الإنترنت وحاول مرة أخرى.';
   }finally{if(btn)btn.disabled=false;}
 });
 
@@ -758,7 +796,7 @@ async function init(){
 
   setInterval(function(){if(!document.hidden&&S.key)load();},20000);
   document.addEventListener('visibilitychange',function(){if(!document.hidden&&S.key)load();});
-  try{S.key=localStorage.getItem('dashKey')||'';}catch(e){}
+  try{var raw=localStorage.getItem('sbSession');if(raw){SESSION=JSON.parse(raw);S.key=SESSION.access||'';}}catch(e){}
   if(!S.key){S.loaded=true;render();showLogin();return;}
   await load();
 }
